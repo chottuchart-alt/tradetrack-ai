@@ -1,189 +1,157 @@
 import streamlit as st
-import easyocr
 from PIL import Image
+import pytesseract
 import re
-import sqlite3
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime
-import numpy as np
+import os
 
-st.set_page_config(page_title="TradeTrack AI PRO", page_icon="📊", layout="wide")
+st.set_page_config(page_title="AI Trading Journal PRO", layout="centered")
 
-# ---------------- STYLE ----------------
-st.markdown("""
-<style>
-body { background-color: #0e1117; color: white; }
-.block-container { padding-top: 2rem; }
-</style>
-""", unsafe_allow_html=True)
+st.title("📊 AI Trading Screenshot Analyzer PRO")
 
-st.title("📊 TradeTrack AI PRO")
-st.caption("Advanced Screenshot Analyzer for Traders")
-
-# ---------------- DATABASE ----------------
-conn = sqlite3.connect("trades.db", check_same_thread=False)
-c = conn.cursor()
-c.execute("""
-CREATE TABLE IF NOT EXISTS trades (
-    date TEXT,
-    amount REAL,
-    type TEXT,
-    lot TEXT,
-    symbol TEXT,
-    order_type TEXT,
-    platform TEXT
-)
-""")
-conn.commit()
-
-# ---------------- OCR LOAD ----------------
-@st.cache_resource
-def load_reader():
-    return easyocr.Reader(['en'], gpu=False)
-
-reader = load_reader()
-
-# ---------------- EXTRACT FUNCTION ----------------
+# -----------------------------
+# OCR FUNCTION
+# -----------------------------
 def extract_data(image):
-    image_np = np.array(image)
-    results = reader.readtext(image_np, detail=0)
-    text = " ".join(results)
+    text = pytesseract.image_to_string(image)
+    text_lower = text.lower()
 
-    # Amount
-    amount_match = re.search(r"[-+]?\d+\.\d+", text)
-    amount = float(amount_match.group()) if amount_match else 0.0
-    trade_type = "Profit" if amount > 0 else "Loss"
-
-    # Lot size
-    lot_match = re.search(r"\b0\.\d+\b|\b[1-9]\d*\.\d+\b", text)
-    lot = lot_match.group() if lot_match else "Unknown"
-
-    # Symbol
-    symbol_match = re.search(r"\b[A-Z]{3,6}\b", text)
-    symbol = symbol_match.group() if symbol_match else "Unknown"
-
-    # Order type
-    if "buy" in text.lower():
-        order = "Buy"
-    elif "sell" in text.lower():
-        order = "Sell"
-    else:
-        order = "Unknown"
-
-    # Date
-    date_match = re.search(r"\d{2}/\d{2}/\d{4}", text)
-    date = date_match.group() if date_match else datetime.today().strftime("%d/%m/%Y")
-
-    # Platform
-    if "MT4" in text:
-        platform = "MT4"
-    elif "MT5" in text:
+    # Detect Platform
+    platform = "Unknown"
+    if "metaquotes" in text_lower or "mt5" in text_lower:
         platform = "MT5"
-    elif "Binance" in text:
-        platform = "Binance"
-    else:
-        platform = "Unknown"
+    elif "mt4" in text_lower:
+        platform = "MT4"
 
-    # Smart insight
-    if order == "Buy" and trade_type == "Profit":
-        insight = "Strong Uptrend Confirmation"
-    elif order == "Sell" and trade_type == "Profit":
-        insight = "Strong Downtrend Confirmation"
-    else:
-        insight = "Volatile / Weak Structure"
+    # Detect Symbol
+    symbol_match = re.search(r'(XAUUSD|EURUSD|BTCUSD|GBPUSD|USDJPY)', text)
+    symbol = symbol_match.group(1) if symbol_match else "Unknown"
+
+    # Detect Lot Size
+    lot_match = re.search(r'0\.\d+', text)
+    lot = lot_match.group() if lot_match else "0.01"
+
+    # Detect Order Type
+    order = "Unknown"
+    if "buy" in text_lower:
+        order = "Buy"
+    elif "sell" in text_lower:
+        order = "Sell"
+
+    # Detect Today P/L (Bottom Most Value)
+    numbers = re.findall(r'[-+]?\d+[.,]?\d*', text)
+    today_pl = numbers[-1] if numbers else "0"
 
     return {
-        "amount": amount,
-        "type": trade_type,
-        "lot": lot,
-        "symbol": symbol,
-        "order": order,
-        "date": date,
         "platform": platform,
-        "insight": insight
+        "symbol": symbol,
+        "lot": lot,
+        "order": order,
+        "today_pl": today_pl
     }
 
-# ---------------- SIDEBAR ----------------
-st.sidebar.header("Upload Trade Screenshot")
-file = st.sidebar.file_uploader("Upload Image", type=["png","jpg","jpeg"])
+# -----------------------------
+# AI Insight Generator
+# -----------------------------
+def generate_insight(order, pl):
+    try:
+        pl_value = float(pl.replace(",", ""))
+    except:
+        pl_value = 0
 
-if file:
-    image = Image.open(file)
-    st.sidebar.image(image, use_column_width=True)
+    if pl_value > 0:
+        return "Strong Trade Execution 👍 Trend Followed Properly"
+    elif pl_value < 0:
+        return "Loss Trade ⚠ Check Entry Confirmation"
+    else:
+        return "Break Even / Minimal Movement"
 
-    with st.spinner("Analyzing Screenshot..."):
-        data = extract_data(image)
+# -----------------------------
+# File Storage
+# -----------------------------
+FILE_NAME = "trade_data.csv"
 
-    st.sidebar.success(f"{data['type']} ₹{data['amount']}")
-    st.sidebar.write(f"Lot Size: {data['lot']}")
-    st.sidebar.write(f"Symbol: {data['symbol']}")
-    st.sidebar.write(f"Order: {data['order']}")
-    st.sidebar.write(f"Platform: {data['platform']}")
-    st.sidebar.write(f"Insight: {data['insight']}")
+def save_trade(data):
+    df_new = pd.DataFrame([{
+        "date": datetime.now().strftime("%d-%m-%Y"),
+        "platform": data["platform"],
+        "symbol": data["symbol"],
+        "lot": data["lot"],
+        "order": data["order"],
+        "today_pl": float(data["today_pl"].replace(",", ""))
+    }])
 
-    if st.sidebar.button("Save Trade"):
-        c.execute("INSERT INTO trades VALUES (?, ?, ?, ?, ?, ?, ?)",
-                  (data["date"], data["amount"], data["type"],
-                   data["lot"], data["symbol"], data["order"], data["platform"]))
-        conn.commit()
-        st.sidebar.success("Trade Saved!")
+    if os.path.exists(FILE_NAME):
+        df_old = pd.read_csv(FILE_NAME)
+        df = pd.concat([df_old, df_new], ignore_index=True)
+    else:
+        df = df_new
 
-# ---------------- LOAD DATA ----------------
-df = pd.read_sql_query("SELECT * FROM trades", conn)
+    df.to_csv(FILE_NAME, index=False)
 
-if not df.empty:
-    df["date"] = pd.to_datetime(df["date"], format="%d/%m/%Y")
-    df = df.sort_values("date")
+def load_data():
+    if os.path.exists(FILE_NAME):
+        return pd.read_csv(FILE_NAME)
+    return pd.DataFrame()
 
-    total = df["amount"].sum()
-    wins = len(df[df["amount"] > 0])
-    losses = len(df[df["amount"] < 0])
-    winrate = (wins / len(df)) * 100
-    equity = df["amount"].cumsum()
-    tax_estimate = total * 0.30 if total > 0 else 0
+# -----------------------------
+# Upload Section
+# -----------------------------
+uploaded_file = st.file_uploader("📤 Upload Trading Screenshot", type=["png", "jpg", "jpeg"])
 
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Total P/L", f"₹{round(total,2)}")
-    col2.metric("Wins", wins)
-    col3.metric("Losses", losses)
-    col4.metric("Win Rate", f"{round(winrate,2)}%")
-    col5.metric("Est. Tax (30%)", f"₹{round(tax_estimate,2)}")
+if uploaded_file:
+    image = Image.open(uploaded_file)
+    st.image(image, use_column_width=True)
+
+    data = extract_data(image)
+    insight = generate_insight(data["order"], data["today_pl"])
 
     st.markdown("---")
+    st.subheader("📌 Trade Analysis Result")
 
-    # Filter
-    platforms = st.multiselect("Filter Platform", df["platform"].unique(), default=df["platform"].unique())
-    filtered = df[df["platform"].isin(platforms)]
+    col1, col2 = st.columns(2)
 
-    # Equity Curve
-    st.subheader("📈 Equity Curve")
-    fig1, ax1 = plt.subplots()
-    ax1.plot(filtered["date"], filtered["amount"].cumsum())
-    ax1.set_title("Equity Growth")
-    st.pyplot(fig1)
+    with col1:
+        st.metric("💰 Today's P/L", f"₹ {data['today_pl']}")
+        st.write("📈 Symbol:", data["symbol"])
+        st.write("📊 Lot Size:", data["lot"])
 
-    # Monthly Performance
-    st.subheader("📊 Monthly Performance")
-    filtered["month"] = filtered["date"].dt.to_period("M")
-    monthly = filtered.groupby("month")["amount"].sum()
+    with col2:
+        st.write("🖥 Platform:", data["platform"])
+        st.write("📝 Order:", data["order"])
+        st.write("🧠 Insight:", insight)
 
-    fig2, ax2 = plt.subplots()
-    monthly.plot(kind="bar", ax=ax2)
-    st.pyplot(fig2)
+    if st.button("💾 Save Trade"):
+        save_trade(data)
+        st.success("Trade Saved Successfully!")
 
-    # History Table
-    st.subheader("📋 Trade History")
-    st.dataframe(filtered)
+# -----------------------------
+# Monthly Dashboard
+# -----------------------------
+st.markdown("---")
+st.subheader("📅 Monthly Performance")
 
-    # CSV
-    csv = filtered.to_csv(index=False).encode("utf-8")
-    st.download_button("Download CSV Report", csv, "trade_report.csv", "text/csv")
+df = load_data()
 
-    if st.button("Delete All Trades"):
-        c.execute("DELETE FROM trades")
-        conn.commit()
-        st.warning("All trades deleted. Refresh page.")
+if not df.empty:
+    total_profit = df["today_pl"].sum()
+    total_trades = len(df)
+    win_trades = len(df[df["today_pl"] > 0])
+    loss_trades = len(df[df["today_pl"] < 0])
+
+    st.metric("📈 Total P/L", f"₹ {round(total_profit,2)}")
+    st.write("Total Trades:", total_trades)
+    st.write("Winning Trades:", win_trades)
+    st.write("Losing Trades:", loss_trades)
+
+    fig = plt.figure()
+    df["today_pl"].cumsum().plot()
+    plt.title("Equity Growth Curve")
+    plt.xlabel("Trades")
+    plt.ylabel("Profit")
+    st.pyplot(fig)
 
 else:
-    st.info("No trades uploaded yet.")
+    st.info("No trades saved yet.")
