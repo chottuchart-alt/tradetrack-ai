@@ -1,5 +1,7 @@
 streamlit
-pytesseract
+easyocr
 Pillow
 matplotlib
 pandas
+numpy
+torch
